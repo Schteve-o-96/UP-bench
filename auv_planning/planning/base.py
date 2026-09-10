@@ -46,7 +46,7 @@ class BasePlanner:
         self.current_time = 0.0
 
         # area define x:-50~50, y:-50~50, z:-50~0 — matches wave's seafloor.obj
-        # terrain mesh extent (external/evaluation/baselines/upbench_scenarios.py)
+        # terrain mesh extent (external/evaluation/baselines/stress_scenarios.py)
         self.x_min = -50
         self.x_max = 50
         self.y_min = -50
