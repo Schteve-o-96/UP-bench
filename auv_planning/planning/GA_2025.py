@@ -23,8 +23,11 @@ class GeneticPlanner(BasePlanner):
         self.mutation_rate = mutation_rate
         self.crossover_rate = crossover_rate
 
-        self.obstacle_radius = 5
-
+        # BUG: drops every constructor arg above (grid_resolution, max_steps,
+        # max_lin_accel, collision_threshold) -- BasePlanner.__init__() runs
+        # with its own defaults (grid_resolution=0.1 etc.) regardless of what
+        # was passed to GeneticPlanner(...). ACOPlanner has the identical bug.
+        # Fix: super().__init__(grid_resolution, max_steps, max_lin_accel, collision_threshold)
         super().__init__()
 
     # -------------------------
@@ -57,7 +60,7 @@ class GeneticPlanner(BasePlanner):
             t = i / (num_samples - 1)
             pt = p1 + t * (p2 - p1)
             for obs in obstacles:
-                if np.linalg.norm(pt - np.array(obs)) < self.obstacle_radius:
+                if obs.contains_point(pt):
                     return False
         return True
 
@@ -72,16 +75,16 @@ class GeneticPlanner(BasePlanner):
         return penalty
 
     def path_length(self, candidate):
-    """
-    Calculate the total length of candidate paths (Euclidean distance accumulation)
-    """
+        """
+        Calculate the total length of candidate paths (Euclidean distance accumulation)
+        """
         length = 0.0
         for i in range(len(candidate) - 1):
             length += np.linalg.norm(candidate[i + 1] - candidate[i])
         return length
 
     def fitness(self, candidate, obstacles):
-         """
+        """
         The fitness of the candidate path: path length plus collision penalty, the smaller the value, the better
         """
         return self.path_length(candidate) + self.path_collision_penalty(candidate, obstacles)
@@ -167,6 +170,32 @@ class GeneticPlanner(BasePlanner):
         4. Call control_loop() for path tracking and record the execution time.
         5. Reuse common_train_cleanup() to record indicators, update cumulative statistics and return results.
         """
+        # BUG: self.config is never assigned anywhere in this class (unlike
+        # AStarPlanner/ACOPlanner, which both set self.config = {...} before
+        # use) -- common_train_setup() below is called with self.config and
+        # raises AttributeError on the very first episode, unconditionally.
+        # Fix: assign self.config = {...} (the same dict below) before the
+        # training loop, then call self.initialize_wandb(...) with it,
+        # mirroring ACOPlanner.train()'s pattern exactly:
+        #
+        #   self.config = {
+        #       "grid_resolution": self.grid_resolution,
+        #       "max_steps": self.max_steps,
+        #       "max_lin_accel": self.max_lin_accel,
+        #       "collision_threshold": self.collision_threshold,
+        #       "population_size": self.population_size,
+        #       "generations": self.generations,
+        #       "num_episodes": num_episodes,
+        #       "num_intermediate": self.num_intermediate,
+        #       "mutation_rate": self.mutation_rate,
+        #       "crossover_rate": self.crossover_rate,
+        #       "planning_region": {
+        #           "x": [self.x_min, self.x_max],
+        #           "y": [self.y_min, self.y_max],
+        #           "z": [self.z_min, self.z_max],
+        #       }
+        #   }
+        #   self.initialize_wandb("auv_Genetic_3D_LQR_planning", "Genetic_3D_LQR_run", self.config)
         wandb.init(project="auv_Genetic_3D_LQR_planning", name="Genetic_3D_LQR_run")
         wandb.config.update({
             "grid_resolution": self.grid_resolution,

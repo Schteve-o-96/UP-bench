@@ -12,7 +12,8 @@ from .base import BasePlanner
 class RSAPPlanner(BasePlanner):
     def __init__(self, grid_resolution=0.1, max_steps=2000,
                  max_lin_accel=10, collision_threshold=5.0, ticks_per_sec=100,
-                 k_att=1.0, k_rep=100.0, d0=10.0, desired_speed=3.0, shape_update_freq=5):
+                 k_att=1.0, k_rep=100.0, d0=10.0, desired_speed=3.0, shape_update_freq=5,
+                 stop_after_successes=10):
         """
         Parameters:
           - grid_resolution: resolution for obstacle detection
@@ -25,6 +26,8 @@ class RSAPPlanner(BasePlanner):
           - d0: repulsive influence threshold (obstacles within d0 generate repulsion)
           - desired_speed: desired speed (for generating desired state)
           - shape_update_freq: update frequency for obstacle clustering
+          - stop_after_successes: see BasePlanner — pass None to always run
+            num_episodes regardless of success count.
         """
         # Set RSAP-specific parameters
         self.k_att = k_att
@@ -36,7 +39,8 @@ class RSAPPlanner(BasePlanner):
         self.repulsive_shapes = []  # list of (centroid, radius)
 
         # Call BasePlanner initializer to setup region, LQR, etc.
-        super().__init__(grid_resolution, max_steps, max_lin_accel, collision_threshold, ticks_per_sec)
+        super().__init__(grid_resolution, max_steps, max_lin_accel, collision_threshold, ticks_per_sec,
+                          stop_after_successes)
 
     def compute_repulsive_shapes(self):
         """
@@ -115,12 +119,29 @@ class RSAPPlanner(BasePlanner):
 
         episode = 0
         reach_target_count = 0
+        # One dict per episode, built up across setup/control-loop/cleanup and
+        # logged/appended once at the end — see run_envelope_experiment.py,
+        # which reads this list directly instead of pulling from wandb, so
+        # multi-archetype runs collect into one in-memory/CSV dataset without
+        # needing a wandb history join.
+        self.episode_records = []
 
-        while reach_target_count < 10 and episode < num_episodes:
+        while self._below_success_cap(reach_target_count) and episode < num_episodes:
             # Common training setup: reset env and get start/goal
             episode, reach_target_count, start_pos, goal_pos, episode_start_time = self.common_train_setup(
                 env, episode, reach_target_count, "auv_RSAP_planning", "RSAP_run", self.config
             )
+
+            # Scenario-agnostic difficulty features for this episode's freshly
+            # sampled scene (see WaveEnvironment._update_episode_features), so
+            # collision/timeout outcomes can be correlated against them afterward.
+            episode_record = {
+                "episode": episode + 1,
+                "archetype": env.scenario_name,
+                "min_obstacle_standoff": env.min_obstacle_standoff,
+                "current_magnitude": env.current_magnitude_at_start,
+                "spawn_yaw_offset": env.spawn_yaw_offset,
+            }
 
             # RSAP planning is integrated in the control loop; set planning duration to the setup time.
             planning_duration = time.time() - episode_start_time
@@ -132,6 +153,7 @@ class RSAPPlanner(BasePlanner):
             collisions = 0
             energy = 0.0
             smoothness = 0.0
+            closest_approach = float("inf")
             prev_u = None
             current_pos = start_pos.copy()
 
@@ -174,9 +196,17 @@ class RSAPPlanner(BasePlanner):
 
                 # Collision check
                 for obs in env.obstacles:
-                    if np.linalg.norm(new_pos - np.array(obs)) < self.collision_threshold:
+                    if obs.distance_to_surface(new_pos) < self.collision_threshold:
                         collisions += 1
                         break
+
+                # Running minimum distance to any obstacle's surface, independent of
+                # the collision counter above, so episode_closest_approach is a graded
+                # "how close did it get" figure rather than a binary threshold count.
+                if env.obstacles:
+                    closest_approach = min(
+                        closest_approach, min(obs.distance_to_surface(new_pos) for obs in env.obstacles),
+                    )
 
                 env.env.draw_line(current_pos.tolist(), new_pos.tolist(), color=[0, 100, 0], thickness=3, lifetime=0)
                 current_pos = new_pos
@@ -193,6 +223,27 @@ class RSAPPlanner(BasePlanner):
 
             exec_end_time = time.time()
             execution_duration = exec_end_time - exec_start_time
+
+            episode_record.update({
+                "closest_approach": closest_approach if math.isfinite(closest_approach) else None,
+                "reached_goal": bool(np.linalg.norm(env.location - goal_pos) < 2),
+                "timed_out": step_count >= self.max_steps,
+                "collisions": collisions,
+                "path_length": total_path_length,
+                "step_count": step_count,
+                # elapsed_sim_time is the reproducible "how long did the task take"
+                # figure (independent of host speed); only meaningful conditioned
+                # on reached_goal=True — a timed-out episode's value is just
+                # max_steps/ticks_per_sec by construction, not informative on its
+                # own. wall_clock_seconds is the real time.time() duration, kept
+                # separately since it's useful for spotting archetypes that are
+                # disproportionately expensive to simulate (e.g. more obstacles ->
+                # slower obstacle-map/clustering per tick), not just harder to solve.
+                "elapsed_sim_time": step_count / self.ticks_per_sec,
+                "wall_clock_seconds": execution_duration,
+            })
+            wandb.log({f"episode_{k}": v for k, v in episode_record.items()})
+            self.episode_records.append(episode_record)
 
             result = self.common_train_cleanup(
                 env, episode, reach_target_count, env.location, goal_pos,

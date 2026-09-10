@@ -14,12 +14,11 @@ class DijkstraPlanner(BasePlanner):
     def __init__(self, grid_resolution=1, max_steps=2000,
                  max_lin_accel=10, collision_threshold=5.0):
         super().__init__(grid_resolution, max_steps, max_lin_accel, collision_threshold, ticks_per_sec=100)
-        self.obstacle_radius = 5
 
 
     class Node:
         def __init__(self, x, y, z, g=0, parent=None):
-           """
+            """
             Parameters:
             - x, y, z: grid index
             - g: cumulative cost from the starting point (f = g in Dijkstra algorithm)

@@ -145,7 +145,7 @@ class SACPlanner(BasePlanner):
         with open(config_file, 'r', encoding="utf-8") as f:
             self.config = yaml.safe_load(f)
 
-          seed = self.config.get("seed", 42)
+        seed = self.config.get("seed", 42)
         np.random.seed(seed)
         random.seed(seed)
         torch.manual_seed(seed)
@@ -353,13 +353,13 @@ class SACPlanner(BasePlanner):
         }, model_path)
 
     def train(self, env , num_episodes=500, max_steps=3000, model_path="sac_best_model.pth"):
-      """
-      Training with custom_environment:
-      - Call env.reset() to reset the environment (draw targets and obstacles internally)
-      - Call env.update_state() to update internal states (location, rotation, velocity, lasers) after getting initial sensor data
-      - Use env.get_current_target() to get the target position
-      - Call env.tick(adjusted_action) at each step to execute the action and update the state
-      """
+        """
+        Training with custom_environment:
+        - Call env.reset() to reset the environment (draw targets and obstacles internally)
+        - Call env.update_state() to update internal states (location, rotation, velocity, lasers) after getting initial sensor data
+        - Use env.get_current_target() to get the target position
+        - Call env.tick(adjusted_action) at each step to execute the action and update the state
+        """
         wandb.init(project="auv_RL_control_SAC_acceleration_1015", name=model_path)
         wandb.config.update({
             "state_dim": self.state_dim,

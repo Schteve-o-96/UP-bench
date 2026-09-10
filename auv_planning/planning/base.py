@@ -11,7 +11,8 @@ from scipy.interpolate import splprep, splev
 
 class BasePlanner:
     def __init__(self, grid_resolution=0.1, max_steps=2000,
-                 max_lin_accel=10, collision_threshold=5.0, ticks_per_sec=100):
+                 max_lin_accel=10, collision_threshold=5.0, ticks_per_sec=100,
+                 stop_after_successes=10):
         """
         Parameters:
           - grid_resolution: resolution for discretizing space (increase to reduce computation)
@@ -19,6 +20,13 @@ class BasePlanner:
           - max_lin_accel: control limit (max linear acceleration)
           - collision_threshold: collision distance threshold
           - ticks_per_sec: simulation frequency
+          - stop_after_successes: end training early once this many episodes have
+            reached the goal, even if num_episodes hasn't been used up yet
+            (default 10, matching the original hardcoded behavior). Pass None to
+            always run exactly num_episodes regardless of success count — needed
+            for experiments that sample a fixed N per condition (e.g. mapping an
+            operating envelope), where stopping early on easy conditions but not
+            hard ones biases the collected data toward failures.
         """
 
         # EVALUATION METRICS
@@ -33,15 +41,17 @@ class BasePlanner:
         self.max_lin_accel = max_lin_accel
         self.collision_threshold = collision_threshold
         self.ticks_per_sec = ticks_per_sec
+        self.stop_after_successes = stop_after_successes
         self.ts = 1.0 / self.ticks_per_sec
         self.current_time = 0.0
 
-        # area define x:0~100, y:0~100, z:-100~0）
-        self.x_min = 0
-        self.x_max = 100
-        self.y_min = 0
-        self.y_max = 100
-        self.z_min = -100
+        # area define x:-50~50, y:-50~50, z:-50~0 — matches wave's seafloor.obj
+        # terrain mesh extent (external/evaluation/baselines/upbench_scenarios.py)
+        self.x_min = -50
+        self.x_max = 50
+        self.y_min = -50
+        self.y_max = 50
+        self.z_min = -50
         self.z_max = 0
         self.nx = int((self.x_max - self.x_min) / self.grid_resolution)
         self.ny = int((self.y_max - self.y_min) / self.grid_resolution)
@@ -79,8 +89,14 @@ class BasePlanner:
 
     def create_obstacle_grid(self, obstacles):
         """
-        Build a 3D grid map from the obstacles list: 0 for free, 1 for obstacles
-        Only mark obstacles within the planned area
+        Build a 3D grid map from the obstacles list: 0 for free, 1 for obstacles.
+        Only mark obstacles within the planned area. Each obstacle is checked with
+        its own shape (sphere/box/...) via Obstacle.distance_to_surface, inflated by
+        collision_threshold so the grid carries the same safety margin path validity
+        is checked against -- pre-WAVE this came for free from a fixed obstacle_radius
+        that happened to equal the old default collision_threshold (5.0 both); once
+        obstacles got real per-shape geometry that coincidence went away; this restores
+        the margin explicitly rather than leaving the grid with none.
         """
         nx = int((self.x_max - self.x_min) / self.grid_resolution)
         ny = int((self.y_max - self.y_min) / self.grid_resolution)
@@ -93,12 +109,14 @@ class BasePlanner:
                     self.z_min <= obs[2] <= self.z_max):
                 continue
             obs_idx = self.world_to_index(obs)
-            radius_in_cells = int(math.ceil(self.obstacle_radius / self.grid_resolution))
+            radius_in_cells = int(math.ceil(
+                (obs.bounding_radius() + self.collision_threshold) / self.grid_resolution
+            ))
             for i in range(max(0, obs_idx[0] - radius_in_cells), min(nx, obs_idx[0] + radius_in_cells + 1)):
                 for j in range(max(0, obs_idx[1] - radius_in_cells), min(ny, obs_idx[1] + radius_in_cells + 1)):
                     for k in range(max(0, obs_idx[2] - radius_in_cells), min(nz, obs_idx[2] + radius_in_cells + 1)):
                         cell_center = self.index_to_world((i, j, k))
-                        if np.linalg.norm(cell_center - np.array(obs)) <= self.obstacle_radius:
+                        if obs.distance_to_surface(cell_center) < self.collision_threshold:
                             grid[i, j, k] = 1
         return grid
     def world_to_index(self, pos):
@@ -208,18 +226,21 @@ Convert grid index (ix, iy, iz) to continuous world coordinates (take cell cente
                 return False
         return True
     def log_final_metrics(self, reach_target_count, num_episodes):
+        if reach_target_count == 0:
+            ave_path_length = ave_excu_time = ave_plan_time = ave_smoothness = ave_energy = 0.0
+        else:
+            ave_path_length = self.ave_path_length / reach_target_count
+            ave_excu_time = self.ave_excu_time / reach_target_count
+            ave_plan_time = self.ave_plan_time / reach_target_count
+            ave_smoothness = self.ave_smoothness / reach_target_count
+            ave_energy = self.ave_energy / reach_target_count
         wandb.log({
-            "ave_path_length": self.ave_path_length / reach_target_count,
-            "ave_excu_time": self.ave_excu_time / reach_target_count,
-            "ave_plan_time": self.ave_plan_time / reach_target_count,
-            "ave_smoothness": self.ave_smoothness / reach_target_count,
-            "ave_energy": self.ave_energy / reach_target_count
+            "ave_path_length": ave_path_length,
+            "ave_excu_time": ave_excu_time,
+            "ave_plan_time": ave_plan_time,
+            "ave_smoothness": ave_smoothness,
+            "ave_energy": ave_energy
         })
-        ave_path_length = self.ave_path_length / reach_target_count
-        ave_excu_time = self.ave_excu_time / reach_target_count
-        ave_plan_time = self.ave_plan_time / reach_target_count
-        ave_smoothness = self.ave_smoothness / reach_target_count
-        ave_energy = self.ave_energy / reach_target_count
         print(f"ave_path_length: {ave_path_length}")
         print(f"ave_excu_time: {ave_excu_time}")
         print(f"ave_plan_time: {ave_plan_time}")
@@ -285,7 +306,7 @@ Convert grid index (ix, iy, iz) to continuous world coordinates (take cell cente
             prev_u = u
 
             for obs in env.obstacles:
-                if np.linalg.norm(new_pos - np.array(obs)) < self.collision_threshold:
+                if obs.distance_to_surface(new_pos) < self.collision_threshold:
                     collisions += 1
                     break
 
@@ -308,7 +329,7 @@ Convert grid index (ix, iy, iz) to continuous world coordinates (take cell cente
         self.initialize_wandb(project_name, run_name, config)
 
 
-        while reach_target_count < 10 and episode < config["num_episodes"]:
+        while self._below_success_cap(reach_target_count) and episode < config["num_episodes"]:
             logging.info(f"{run_name} Episode {episode + 1} starting")
             env.reset()
 
@@ -356,7 +377,10 @@ Convert grid index (ix, iy, iz) to continuous world coordinates (take cell cente
             f"Episode {episode + 1} completed - Path Length: {total_path_length}, Steps: {step_count}, Collisions: {collisions}")
         episode += 1
 
-        if reach_target_count >= 10 or episode >= self.config["num_episodes"]:
+        if not self._below_success_cap(reach_target_count) or episode >= self.config["num_episodes"]:
             return self.log_final_metrics(reach_target_count, self.config["num_episodes"])
         env.set_current_target(env.choose_next_target())
         return None  # WHILE NOT FINISH JUST REUTRN None
+
+    def _below_success_cap(self, reach_target_count):
+        return self.stop_after_successes is None or reach_target_count < self.stop_after_successes

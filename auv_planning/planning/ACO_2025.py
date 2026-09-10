@@ -27,9 +27,6 @@ class ACOPlanner(BasePlanner):
         self.Q = Q
         self.max_path_steps = max_path_steps
 
-        # Obstacle safety radius (used to expand the obstacle area)
-        self.obstacle_radius = 5
-
         # Define 26 neighborhood directions (full 3D neighborhood, excluding the origin)
         self.neighbor_shifts = []
         for dx in [-1, 0, 1]:
@@ -41,19 +38,28 @@ class ACOPlanner(BasePlanner):
         self.num_neighbors = len(self.neighbor_shifts)
 
 
+        # BUG: drops every constructor arg above (grid_resolution, max_steps,
+        # max_lin_accel, collision_threshold) -- BasePlanner.__init__() runs
+        # with its own defaults (grid_resolution=0.1 etc.) regardless of what
+        # was passed to ACOPlanner(...). At the default 0.1 resolution over
+        # BasePlanner's -50..50/-50..0 world bounds, plan_path()'s pheromone
+        # grid ((1000, 1000, 500, 26) float64) is a ~97 GiB allocation --
+        # confirmed crashing with numpy._core._exceptions._ArrayMemoryError.
+        # GeneticPlanner has the identical bug.
+        # Fix: super().__init__(grid_resolution, max_steps, max_lin_accel, collision_threshold)
         super().__init__()
 
     def plan_path(self, start, goal, obstacles):
-    """
-    Use the ACO algorithm to plan a path from start to goal
-    Parameters:
-    - start: starting point [x, y, z]
-    - goal: target point [x, y, z]
-    - obstacles: list of obstacles, each is [x, y, z]
-    Returns:
-    - path: list of paths consisting of consecutive coordinate points; returns None if planning fails
-    """
-    # Use create_obstacle_grid() in BasePlanner to build a grid
+        """
+        Use the ACO algorithm to plan a path from start to goal
+        Parameters:
+        - start: starting point [x, y, z]
+        - goal: target point [x, y, z]
+        - obstacles: list of obstacles, each is [x, y, z]
+        Returns:
+        - path: list of paths consisting of consecutive coordinate points; returns None if planning fails
+        """
+        # Use create_obstacle_grid() in BasePlanner to build a grid
         grid = self.create_obstacle_grid(obstacles)
         nx, ny, nz = grid.shape
 
@@ -172,15 +178,15 @@ class ACOPlanner(BasePlanner):
 
     # -------------------------
     def train(self, env, num_episodes=10):
-"""
-After planning the path using the ACO algorithm, use the LQR controller to track the planned path.
-Process:
-1. Call common_train_setup() to reset the environment, get the starting point and target.
-2. Record the duration of the planning phase and call plan_path() to get the path.
-3. Perform spline smoothing on the planned path (reuse smooth_path() in BasePlanner).
-4. Record the duration of the execution phase and call control_loop() for path tracking.
-5. Call common_train_cleanup() to record indicators, update cumulative statistics and return results.
-"""
+        """
+        After planning the path using the ACO algorithm, use the LQR controller to track the planned path.
+        Process:
+        1. Call common_train_setup() to reset the environment, get the starting point and target.
+        2. Record the duration of the planning phase and call plan_path() to get the path.
+        3. Perform spline smoothing on the planned path (reuse smooth_path() in BasePlanner).
+        4. Record the duration of the execution phase and call control_loop() for path tracking.
+        5. Call common_train_cleanup() to record indicators, update cumulative statistics and return results.
+        """
         self.config = {
             "grid_resolution": self.grid_resolution,
             "max_steps": self.max_steps,

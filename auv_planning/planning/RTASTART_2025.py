@@ -254,7 +254,7 @@ class RTAAStarPlanner(BasePlanner):
                 prev_u = u
 
                 for obs in env.obstacles:
-                    if np.linalg.norm(new_pos - np.array(obs)) < self.collision_threshold:
+                    if obs.distance_to_surface(new_pos) < self.collision_threshold:
                         collisions += 1
                         break
 

@@ -31,16 +31,15 @@ class RRTPlanner(BasePlanner):
         self.max_iterations = max_iterations
         self.step_size = step_size
         self.goal_bias = goal_bias
-        self.obstacle_radius = 5 
 
 
     class Node:
         def __init__(self, pos, parent=None):
-        """
-        Parameters:
-        - pos: 3D coordinate, np.array([x, y, z])
-        - parent: parent node (for backtracking path)
-        """
+            """
+            Parameters:
+            - pos: 3D coordinate, np.array([x, y, z])
+            - parent: parent node (for backtracking path)
+            """
             self.pos = pos
             self.parent = parent
 
@@ -64,7 +63,7 @@ class RRTPlanner(BasePlanner):
         return tree[idx]
 
     def is_collision_free(self, p1, p2, obstacles):
-         """
+        """
         Check whether the straight line path from p1 to p2 collides with any obstacle
         Use line segment sampling method to sample a point at a certain step length
         """
@@ -74,7 +73,7 @@ class RRTPlanner(BasePlanner):
             t = i / (num_samples - 1)
             pt = p1 + t * (p2 - p1)
             for obs in obstacles:
-                if np.linalg.norm(pt - np.array(obs)) < self.obstacle_radius:
+                if obs.distance_to_surface(pt) < self.collision_threshold:
                     return False
         return True
 
@@ -93,7 +92,6 @@ class RRTPlanner(BasePlanner):
         tree.append(start_node)
         found = False
         goal_node = None
-
         for _ in range(self.max_iterations):
             rnd_point = self.get_random_point(np.array(goal))
             nearest_node = self.get_nearest_node(tree, rnd_point)

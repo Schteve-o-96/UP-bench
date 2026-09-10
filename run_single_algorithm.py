@@ -1,10 +1,13 @@
 import argparse
 import os
 import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+
 import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
-import holoocean
 from tqdm import tqdm
 from auv_planning.planning.ASTAR_2025 import AStarPlanner
 from auv_planning.planning.RRT_2025 import RRTPlanner
@@ -20,52 +23,65 @@ from auv_planning.planning.Theta_2025 import RSAPPlanner
 from auv_planning.planning.SAC_2025 import SACPlanner
 from auv_planning.planning.SAC_LQR_20251 import SACLQRPlanner
 
-from auv_planning.holoocean_config import scenario
-from auv_planning.custom_env import custom_environment
+from auv_planning.wave_env import WaveEnvironment, HOVERINGAUV_COLLISION_THRESHOLD_M
+from external.evaluation.baselines.stress_scenarios import ALL_STRESS_SCENARIOS
 
 sns.set(context="paper", style="whitegrid", font_scale=0.8)
 
+SCENARIOS = dict(ALL_STRESS_SCENARIOS)
 
-def main(show, plot, verbose, route, num_episodes, max_step, model_path, BS):
-#check if need to install holoocean
-    if "Ocean" not in holoocean.installed_packages():
-        holoocean.install("Ocean")
 
+def main(show, plot, verbose, route, num_episodes, max_step, model_path, BS, scenario, seed, n_targets, debug_draw):
     # initialize holoocean
-    print("Starting HoloOcean environment initialization...")
-    dummy_env = custom_environment(scenario_cfg=scenario, n_targets=10, n_obstacles=20, show_viewport=show, verbose=verbose)
+    print(f"Sampling wave scenario '{scenario}' (seed={seed})...")
+    dummy_env = WaveEnvironment(SCENARIOS[scenario], seed=seed, n_targets=n_targets, show_viewport=show,
+                                 verbose=verbose, debug_draw=debug_draw)
     print("Environment initialized successfully.")
 
     # initialize planner
     planner = None
     if route == "rrt":
-        planner = RRTPlanner(grid_resolution=0.5, max_steps=max_step)
+        planner = RRTPlanner(grid_resolution=0.5, max_steps=max_step,
+                              collision_threshold=HOVERINGAUV_COLLISION_THRESHOLD_M)
     elif route == "astar":
-        planner = AStarPlanner(grid_resolution=0.5, max_steps=max_step)
+        planner = AStarPlanner(grid_resolution=0.5, max_steps=max_step,
+                                collision_threshold=HOVERINGAUV_COLLISION_THRESHOLD_M)
     elif route == "djs":
-        planner = DijkstraPlanner(grid_resolution=0.5, max_steps=max_step)
+        planner = DijkstraPlanner(grid_resolution=0.5, max_steps=max_step,
+                                   collision_threshold=HOVERINGAUV_COLLISION_THRESHOLD_M)
     elif route == "GA":
-        planner = GeneticPlanner(grid_resolution=0.5, max_steps=max_step)
+        planner = GeneticPlanner(grid_resolution=0.5, max_steps=max_step,
+                                  collision_threshold=HOVERINGAUV_COLLISION_THRESHOLD_M)
     elif route == "FA":
-        planner = FireflyPlanner(grid_resolution=0.5, max_steps=max_step)
+        planner = FireflyPlanner(grid_resolution=0.5, max_steps=max_step,
+                                  collision_threshold=HOVERINGAUV_COLLISION_THRESHOLD_M)
     elif route == "ACO":
-        planner = ACOPlanner(grid_resolution=0.5, max_steps=max_step, num_ants=50, iterations=100,
+        planner = ACOPlanner(grid_resolution=0.5, max_steps=max_step,
+                             collision_threshold=HOVERINGAUV_COLLISION_THRESHOLD_M,
+                             num_ants=50, iterations=100,
                              alpha=1.0, beta=4.0, evaporation_rate=0.1, Q=100.0,
                              max_path_steps=max_step)
     elif route == "SAC_LQR":
+        # SACLQRPlanner has no collision_threshold param — it doesn't use
+        # BasePlanner's control_loop collision check.
         planner = SACLQRPlanner(sensor_range=10.0, grid_resolution=0.5, max_steps=max_step, batch_size=BS)
         planner.train(dummy_env, model_path=model_path)
     elif route == "sac":
+        # SACPlanner has no collision_threshold param either — same reason.
         planner = SACPlanner(batch_size=BS, config_file="config_all.yaml")
         planner.train(dummy_env, model_path=model_path)
     elif route == "PFM":
-        planner = PFMPlanner(grid_resolution=0.5, max_steps=max_step)
+        planner = PFMPlanner(grid_resolution=0.5, max_steps=max_step,
+                              collision_threshold=HOVERINGAUV_COLLISION_THRESHOLD_M)
     elif route == "RTTOL":
-        planner = OnlineRRTStarPlanner(grid_resolution=0.5, max_steps=max_step)
+        planner = OnlineRRTStarPlanner(grid_resolution=0.5, max_steps=max_step,
+                                        collision_threshold=HOVERINGAUV_COLLISION_THRESHOLD_M)
     elif route == "RTAST":
-        planner = RTAAStarPlanner(grid_resolution=0.5, max_steps=max_step)
+        planner = RTAAStarPlanner(grid_resolution=0.5, max_steps=max_step,
+                                   collision_threshold=HOVERINGAUV_COLLISION_THRESHOLD_M)
     elif route == "RSAP":
-        planner = RSAPPlanner(grid_resolution=0.5, max_steps=max_step)
+        planner = RSAPPlanner(grid_resolution=0.5, max_steps=max_step,
+                               collision_threshold=HOVERINGAUV_COLLISION_THRESHOLD_M)
     if planner is not None:
         planner.train(dummy_env)
         print(f"Using {route} planner.")
@@ -86,6 +102,9 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--route", type=str, default="RSAP", help="select planner")
+    parser.add_argument("--scenario", type=str, default="cluttered_debris_field_current_L1",
+                         choices=sorted(SCENARIOS), help="select wave scenario archetype")
+    parser.add_argument("--seed", type=int, default=0, help="scenario sampling seed")
     parser.add_argument("--num_episodes", type=int, default=5000, help="total runing episode")
     parser.add_argument("--max_step", type=int, default=10000, help="maxstep per episode")
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size for reinforcement learning")
@@ -94,10 +113,12 @@ if __name__ == "__main__":
     parser.add_argument("--plot", action="store_true", help="plot or noit")
     parser.add_argument("--verbose", action="store_true", help="Log or not")
     parser.add_argument("--n_targets", type=int, default=10, help="Targets number")
-    parser.add_argument("--n_obstacles", type=int, default=20, help="Obstacles number")
+    parser.add_argument("--debug_draw", action="store_true", help="draw debug current-flow arrows")
 
     args = parser.parse_args()
 
     main(show=args.show, plot=args.plot, verbose=args.verbose, route=args.route,
          num_episodes=args.num_episodes, max_step=args.max_step,
-         model_path=args.model_path, BS=args.batch_size)
+         model_path=args.model_path, BS=args.batch_size,
+         scenario=args.scenario, seed=args.seed, n_targets=args.n_targets,
+         debug_draw=args.debug_draw)

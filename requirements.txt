@@ -4,4 +4,6 @@ matplotlib
 scipy
 seaborn
 tqdm
-inekf
+torch
+wandb
+PyQt6

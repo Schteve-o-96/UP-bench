@@ -210,7 +210,6 @@ class SACLQRPlanner(BasePlanner):
         self.y_max = 300
         self.z_min = -100
         self.z_max = 0
-        self.obstacle_radius = 5  # 障碍“膨胀”半径
 
         self.sensor_range = sensor_range
 
@@ -251,44 +250,11 @@ class SACLQRPlanner(BasePlanner):
                 nn.init.constant_(m.bias, 0)
 
 
-    def world_to_index(self, pos):
-        ix = int((pos[0] - self.x_min) / self.grid_resolution)
-        iy = int((pos[1] - self.y_min) / self.grid_resolution)
-        iz = int((pos[2] - self.z_min) / self.grid_resolution)
-        nx = int((self.x_max - self.x_min) / self.grid_resolution)
-        ny = int((self.y_max - self.y_min) / self.grid_resolution)
-        nz = int((self.z_max - self.z_min) / self.grid_resolution)
-        ix = min(max(ix, 0), nx - 1)
-        iy = min(max(iy, 0), ny - 1)
-        iz = min(max(iz, 0), nz - 1)
-        return (ix, iy, iz)
-
-    def index_to_world(self, idx):
-        x = self.x_min + idx[0] * self.grid_resolution + self.grid_resolution / 2.0
-        y = self.y_min + idx[1] * self.grid_resolution + self.grid_resolution / 2.0
-        z = self.z_min + idx[2] * self.grid_resolution + self.grid_resolution / 2.0
-        return np.array([x, y, z])
-
-    def create_obstacle_grid(self, obstacles):
-        nx = int((self.x_max - self.x_min) / self.grid_resolution)
-        ny = int((self.y_max - self.y_min) / self.grid_resolution)
-        nz = int((self.z_max - self.z_min) / self.grid_resolution)
-        grid = np.zeros((nx, ny, nz), dtype=int)
-        for obs in obstacles:
-
-            if not (self.x_min <= obs[0] <= self.x_max and
-                    self.y_min <= obs[1] <= self.y_max and
-                    self.z_min <= obs[2] <= self.z_max):
-                continue
-            obs_idx = self.world_to_index(obs)
-            radius_in_cells = int(math.ceil(self.obstacle_radius / self.grid_resolution))
-            for i in range(max(0, obs_idx[0] - radius_in_cells), min(nx, obs_idx[0] + radius_in_cells + 1)):
-                for j in range(max(0, obs_idx[1] - radius_in_cells), min(ny, obs_idx[1] + radius_in_cells + 1)):
-                    for k in range(max(0, obs_idx[2] - radius_in_cells), min(nz, obs_idx[2] + radius_in_cells + 1)):
-                        cell_center = self.index_to_world((i, j, k))
-                        if np.linalg.norm(cell_center - np.array(obs)) <= self.obstacle_radius:
-                            grid[i, j, k] = 1
-        return grid
+    # world_to_index / index_to_world / create_obstacle_grid are inherited from
+    # BasePlanner (shape-aware via Obstacle.contains_point / bounding_radius).
+    # Note: self.x_min/x_max/y_min/y_max/z_min/z_max/grid_resolution set above are
+    # overwritten by the bare super().__init__() call below regardless (pre-existing,
+    # unrelated to obstacle geometry — not addressed here).
 
     class Node:
         def __init__(self, x, y, z, g=0, h=0, parent=None):
@@ -304,7 +270,7 @@ class SACLQRPlanner(BasePlanner):
             return self.f < other.f
 
     def plan_path(self, start, goal, obstacles):
-         """
+        """
         Use A* algorithm to plan the path
         """
         grid = self.create_obstacle_grid(obstacles)
@@ -465,7 +431,7 @@ class SACLQRPlanner(BasePlanner):
                 break
 
             for obs in env.obstacles:
-                if np.linalg.norm(new_pos - np.array(obs)) < 2.0:
+                if obs.distance_to_surface(new_pos) < 2.0:
                     break
 
             current_pos = new_pos
@@ -561,14 +527,14 @@ class SACLQRPlanner(BasePlanner):
 
     # Main training process: high-level SAC and low-level LQR control work together
     def train(self, env, num_episodes=500, max_macro_steps= 512, model_path="sac_lqr_best_model.pth"):
-    """
-    Training process:
-    1. Reset the environment and get the initial state (starting point and end point)
-    2. Loop: The high-level SAC selects a local sub-goal according to the current state (local goal = current position information + output offset, the offset range is limited to the perception range of 10 meters)
-    3. Low-level: Use A* (only consider obstacles within the perception range) to plan the local path, and then use the LQR controller to track the local path and accumulate step rewards
-    4. Store the "macro step" as a high-level transition in the experience pool and update the SAC network
-    5. Repeat the above process until the AUV reaches the end point (the target distance is less than 2 meters)
-    """
+        """
+        Training process:
+        1. Reset the environment and get the initial state (starting point and end point)
+        2. Loop: The high-level SAC selects a local sub-goal according to the current state (local goal = current position information + output offset, the offset range is limited to the perception range of 10 meters)
+        3. Low-level: Use A* (only consider obstacles within the perception range) to plan the local path, and then use the LQR controller to track the local path and accumulate step rewards
+        4. Store the "macro step" as a high-level transition in the experience pool and update the SAC network
+        5. Repeat the above process until the AUV reaches the end point (the target distance is less than 2 meters)
+        """
         wandb.init(project="auv_SAC_LQR_planning", name=model_path)
         wandb.config.update({
             "state_dim": self.state_dim,
@@ -643,7 +609,7 @@ class SACLQRPlanner(BasePlanner):
                 # Plan a local path: only use obstacles within the sensing range
                 local_obstacles = []
                 for obs in env.obstacles:
-                    if np.linalg.norm(np.array(obs) - current_pos) <= self.sensor_range:
+                    if obs.distance_to_surface(current_pos) <= self.sensor_range:
                         local_obstacles.append(obs)
                 path = self.plan_path(current_pos, local_goal, local_obstacles)
                 if path is None:

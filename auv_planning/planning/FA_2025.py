@@ -24,8 +24,6 @@ class FireflyPlanner(BasePlanner):
         self.beta0 = beta0
         self.gamma = gamma
 
-        self.obstacle_radius = 5
-
         super().__init__()
     
     # -------------------------
@@ -55,7 +53,7 @@ class FireflyPlanner(BasePlanner):
     def is_collision_free(self, p1, p2, obstacles):
         """
         Check whether the straight line path from p1 to p2 collides with any obstacle.
-        Use line segment sampling detection. If the distance from any point to the obstacle is less than obstacle_radius, it is considered a collision.
+        Use line segment sampling detection. If any point falls inside an obstacle's shape, it is considered a collision.
         """
         dist = np.linalg.norm(p2 - p1)
         num_samples = max(int(dist / (self.grid_resolution / 2)), 2)
@@ -63,7 +61,7 @@ class FireflyPlanner(BasePlanner):
             t = i / (num_samples - 1)
             pt = p1 + t * (p2 - p1)
             for obs in obstacles:
-                if np.linalg.norm(pt - np.array(obs)) < self.obstacle_radius:
+                if obs.contains_point(pt):
                     return False
         return True
 
@@ -267,7 +265,7 @@ class FireflyPlanner(BasePlanner):
                 prev_u = u
 
                 for obs in env.obstacles:
-                    if np.linalg.norm(new_pos - np.array(obs)) < self.collision_threshold:
+                    if obs.distance_to_surface(new_pos) < self.collision_threshold:
                         collisions += 1
                         break
 

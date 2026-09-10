@@ -9,7 +9,6 @@ from .holoocean_config import scenario
 class custom_environment:
     def __init__(self, scenario_cfg = scenario, n_targets=0, n_obstacles=0, show_viewport =False, verbose = False):
         """
-
         Initialize the custom environment.
 
         Parameters:
@@ -47,7 +46,7 @@ class custom_environment:
 
     def generate_random_obstacle(self):
         """Generate a random obstacle position."""
-        return [random.randint(0, 100), random.randint(-100, -0), random.randint(-100, 0)]
+        return [random.randint(0, 100), random.randint(5, 100), random.randint(-100, 0)]
 
     def choose_next_target(self):
         """
