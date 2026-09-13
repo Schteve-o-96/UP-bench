@@ -22,7 +22,10 @@ from external.evaluation.baselines.stress_scenarios import (
     OFFLINE_STRESS_SCENARIOS, DIFFICULTY_EXTRACTORS, DIFFICULTY_AXIS_LABELS,
     FAMILY_SEED_OFFSETS, FAMILY_SEED_STRIDE,
 )
-from _experiment_common import install_native_target_sampling, sync_planner_bounds, existing_keys
+from _experiment_common import (
+    install_native_target_sampling, install_native_target_pool_reuse, sync_planner_bounds, existing_keys,
+    fast_forward_episodes,
+)
 
 _PLAN_METHODS = {
     AStarPlanner: "plan_path",
@@ -69,9 +72,10 @@ def _path_collision_check(obstacles, path, collision_threshold):
 def _print_episode_progress(self, record):
     family = getattr(self, "_wave_family", None)
     label = f"{family or '?'}/{getattr(self, '_wave_planner_key', '?')}"
-    n = len(self.episode_records)
+    n = record["episode"]
     total = getattr(self, "_wave_num_episodes", None)
-    denom = f"/{total}" if total is not None else ""
+    offset = getattr(self, "_wave_episode_offset", 0)
+    denom = f"/{total + offset}" if total is not None else ""
     if not record["plan_found"]:
         status = "plan_fail"
     elif record["reached_goal"]:
@@ -96,6 +100,10 @@ def _current_difficulty_value(self) -> float | None:
     return extractor(env.scene)
 
 
+def _episode_number(self):
+    return len(self.episode_records) + 1 + getattr(self, "_wave_episode_offset", 0)
+
+
 def _instrumented_plan(original):
     def wrapped(self, start, goal, obstacles):
         t0 = time.time()
@@ -103,7 +111,7 @@ def _instrumented_plan(original):
         planning_duration = time.time() - t0
         if result is None:
             record = {
-                "episode": len(self.episode_records) + 1,
+                "episode": _episode_number(self),
                 "difficulty_value": _current_difficulty_value(self),
                 "plan_found": False,
                 "reached_goal": False,
@@ -174,7 +182,7 @@ def _instrumented_control_loop(original):
         self._pending_raw_violations = None
         self._pending_raw_min_clearance = None
         record = {
-            "episode": len(self.episode_records) + 1,
+            "episode": _episode_number(self),
             "difficulty_value": _current_difficulty_value(self),
             "plan_found": True,
             "reached_goal": bool(reached_goal),
@@ -233,7 +241,7 @@ def install_episode_instrumentation():
 
 def run_family_planner(
     family, builder, planner_key, max_step, seed, num_episodes, n_targets, show, verbose, debug_draw,
-    combo_index=None, total_combos=None,
+    combo_index=None, total_combos=None, skip_episodes=0,
 ):
     combo_note = f"[{combo_index}/{total_combos}] " if combo_index is not None else ""
     print(f"{combo_note}[{family}] planner={planner_key} sampling scenario and initializing HoloOcean...")
@@ -241,6 +249,10 @@ def run_family_planner(
         builder, seed=seed, n_targets=n_targets, show_viewport=show, verbose=verbose, debug_draw=debug_draw,
     )
     try:
+        if skip_episodes:
+            print(f"{combo_note}[{family}] planner={planner_key} fast-forwarding {skip_episodes} episode(s) "
+                  f"to reproduce episode {skip_episodes + 1} of a longer run with the same --seed...")
+            fast_forward_episodes(env, skip_episodes)
         planner = PLANNER_FACTORIES[planner_key](max_step)
         sync_planner_bounds(planner, env)
         planner.episode_records = []
@@ -248,6 +260,7 @@ def run_family_planner(
         planner._wave_family = family
         planner._wave_planner_key = planner_key
         planner._wave_num_episodes = num_episodes
+        planner._wave_episode_offset = skip_episodes
         planner.stop_after_successes = None
         planner.train(env, num_episodes=num_episodes)
         records = planner.episode_records
@@ -257,9 +270,11 @@ def run_family_planner(
         env.close(f"{family}/{planner_key}")
 
 
-def main(planner_keys, families, seed, num_episodes, max_step, n_targets, show, verbose, debug_draw, out, extend):
+def main(planner_keys, families, seed, num_episodes, max_step, n_targets, show, verbose, debug_draw, out, extend,
+         skip_episodes=0):
     install_episode_instrumentation()
     install_native_target_sampling()
+    install_native_target_pool_reuse()
 
     scenarios = {f: b for f, b in OFFLINE_STRESS_SCENARIOS.items() if f in families}
     if not scenarios:
@@ -286,7 +301,7 @@ def main(planner_keys, families, seed, num_episodes, max_step, n_targets, show, 
                 continue
             records = run_family_planner(
                 family, builder, planner_key, max_step, family_seed, num_episodes, n_targets, show, verbose, debug_draw,
-                combo_index=combo_index, total_combos=total_combos,
+                combo_index=combo_index, total_combos=total_combos, skip_episodes=skip_episodes,
             )
             for record in records:
                 record["planner"] = planner_key
@@ -343,6 +358,14 @@ if __name__ == "__main__":
     parser.add_argument("--extend", action="store_true",
                          help="append to --out instead of overwriting it, skipping any (family, planner) "
                               "combo already present -- default is to overwrite, as before")
+    parser.add_argument("--skip_episodes", type=int, default=0,
+                         help="fast-forward this many episodes (scene resample + goal advance, no "
+                              "planning/execution) before running the real episode(s). To reproduce a "
+                              "single failing episode from a larger run, rerun with the *same* --seed, "
+                              "--num_episodes 1, and --skip_episodes set to (failing episode's CSV "
+                              "'episode' number - 1) -- this lands on the same scene and, for families "
+                              "like upbench_native_mirror whose goal pool is drawn once and consumed in "
+                              "sequence across episodes, the same goal too")
     args = parser.parse_args()
 
     planner_keys = args.planners.split(",") if args.planners else list(PLANNER_FACTORIES)
@@ -359,4 +382,5 @@ if __name__ == "__main__":
     main(
         planner_keys, families, args.seed, args.num_episodes, args.max_step,
         args.n_targets, args.show, args.verbose, args.debug_draw, Path(args.out), args.extend,
+        skip_episodes=args.skip_episodes,
     )

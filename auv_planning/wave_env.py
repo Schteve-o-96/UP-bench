@@ -110,17 +110,21 @@ class WaveEnvironment:
     def _sample_random_targets(self, n):
         random.seed(self._episode_seed())
         goal_region = next((r for r in self.scene.regions if r.name == GOAL_ZONE_NAME), None)
-        targets = []
-        for _ in range(n):
-            for _ in range(1000):
-                candidate = self._sample_target_candidate(goal_region)
-                if not any(
-                    obs.distance_to_surface(candidate) < HOVERINGAUV_COLLISION_THRESHOLD_M
-                    for obs in self.obstacles
-                ):
-                    break
-            targets.append(candidate)
-        return targets
+        return [
+            self._sample_avoiding_obstacles(lambda: self._sample_target_candidate(goal_region))
+            for _ in range(n)
+        ]
+
+    def _sample_avoiding_obstacles(self, candidate_fn, max_attempts=1000):
+        candidate = candidate_fn()
+        for _ in range(max_attempts):
+            if not any(
+                obs.distance_to_surface(candidate) < HOVERINGAUV_COLLISION_THRESHOLD_M
+                for obs in self.obstacles
+            ):
+                return candidate
+            candidate = candidate_fn()
+        return candidate
 
     def _sample_target_candidate(self, goal_region):
         bounds = self.scene.scene_bounds
@@ -158,6 +162,11 @@ class WaveEnvironment:
             else:
                 self.env.draw_point(i, color=[255, 255, 0], thickness=5, lifetime=0)
 
+    def _refresh_targets_for_new_episode(self):
+        self.targets = self._sample_random_targets(len(self.targets))
+        self.choosen_targets = []
+        self.current_target = self.choose_next_target()
+
     def reset(self):
         if self._needs_resample:
             self._resample_scene()
@@ -172,9 +181,7 @@ class WaveEnvironment:
         )
         self._spawn_props()
 
-        self.targets = self._sample_random_targets(len(self.targets))
-        self.choosen_targets = []
-        self.current_target = self.choose_next_target()
+        self._refresh_targets_for_new_episode()
 
         bounds = self.scene.scene_bounds
         center = [(bounds.x[0] + bounds.x[1]) / 2, (bounds.y[0] + bounds.y[1]) / 2, (bounds.z[0] + bounds.z[1]) / 2]

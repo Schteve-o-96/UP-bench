@@ -18,7 +18,10 @@ from external.evaluation.baselines.stress_scenarios import (
     ALL_STRESS_SCENARIOS, DIFFICULTY_EXTRACTORS, DIFFICULTY_AXIS_LABELS,
     FAMILY_SEED_OFFSETS, FAMILY_SEED_STRIDE,
 )
-from _experiment_common import install_native_target_sampling, sync_planner_bounds, existing_keys
+from _experiment_common import (
+    install_native_target_sampling, install_native_target_pool_reuse, sync_planner_bounds, existing_keys,
+    fast_forward_episodes,
+)
 
 SCENARIOS = dict(ALL_STRESS_SCENARIOS)
 
@@ -51,9 +54,10 @@ def install_difficulty_logging():
             self._wave_difficulty_log = []
         self._wave_difficulty_log.append(value)
 
-        n = len(self._wave_difficulty_log)
+        offset = getattr(self, "_wave_episode_offset", 0)
+        n = len(self._wave_difficulty_log) + offset
         total = getattr(self, "_wave_num_episodes", None)
-        denom = f"/{total}" if total is not None else ""
+        denom = f"/{total + offset}" if total is not None else ""
         name = getattr(self, "_wave_archetype_name", self.scenario_name)
         value_note = f" — difficulty={value:.3g}" if value is not None else ""
         print(f"    [{name}] episode {n}{denom}{value_note}")
@@ -64,7 +68,7 @@ def install_difficulty_logging():
 
 def run_archetype(
     name, builder, *, seed, num_episodes, n_targets, max_step, show, verbose, debug_draw,
-    combo_index=None, total_combos=None,
+    combo_index=None, total_combos=None, skip_episodes=0,
 ):
     combo_note = f"[{combo_index}/{total_combos}] " if combo_index is not None else ""
     print(f"{combo_note}[{name}] sampling scenario and initializing HoloOcean...")
@@ -73,7 +77,19 @@ def run_archetype(
     )
     env._wave_archetype_name = name
     env._wave_num_episodes = num_episodes
+    env._wave_episode_offset = skip_episodes
     try:
+        if skip_episodes:
+            print(f"{combo_note}[{name}] fast-forwarding {skip_episodes} episode(s) to reproduce "
+                  f"episode {skip_episodes + 1} of a longer run with the same --seed...")
+            # RSAPPlanner.train() draws env.choose_next_target() twice per real
+            # episode transition (once in common_train_cleanup, again redundantly
+            # in its own loop tail) -- see fast_forward_episodes' docstring.
+            fast_forward_episodes(env, skip_episodes, target_advances_per_episode=2)
+            # Discard the difficulty-log entries instrumented_reset appended for the
+            # fast-forwarded resets above, so it re-aligns 1:1 with the real episode
+            # records train() is about to produce.
+            env._wave_difficulty_log = []
         planner = RSAPPlanner(
             grid_resolution=0.5, max_steps=max_step,
             collision_threshold=HOVERINGAUV_COLLISION_THRESHOLD_M, stop_after_successes=None,
@@ -85,6 +101,7 @@ def run_archetype(
         family = _family_for_scenario_name(name)
         axis_label = DIFFICULTY_AXIS_LABELS.get(family)
         for record, value in zip(records, difficulty_log):
+            record["episode"] += skip_episodes
             record["archetype_family"] = family
             record["difficulty_axis"] = axis_label
             record["difficulty_value"] = value
@@ -94,9 +111,11 @@ def run_archetype(
         env.close(name)
 
 
-def main(scenarios, seed, num_episodes, n_targets, max_step, show, verbose, debug_draw, out, extend):
+def main(scenarios, seed, num_episodes, n_targets, max_step, show, verbose, debug_draw, out, extend,
+         skip_episodes=0):
     install_difficulty_logging()
     install_native_target_sampling()
+    install_native_target_pool_reuse()
 
     base_seed = seed
     existing = existing_keys(out, _FIELDNAMES, lambda row: row["archetype"]) if extend else set()
@@ -114,7 +133,7 @@ def main(scenarios, seed, num_episodes, n_targets, max_step, show, verbose, debu
             seed=base_seed + FAMILY_SEED_OFFSETS[name] * FAMILY_SEED_STRIDE, num_episodes=num_episodes,
             n_targets=n_targets,
             max_step=max_step, show=show, verbose=verbose, debug_draw=debug_draw,
-            combo_index=i + 1, total_combos=total_combos,
+            combo_index=i + 1, total_combos=total_combos, skip_episodes=skip_episodes,
         )
         all_records.extend(records)
 
@@ -153,6 +172,14 @@ if __name__ == "__main__":
     parser.add_argument("--extend", action="store_true",
                          help="append to --out instead of overwriting it, skipping any archetype "
                               "already present -- default is to overwrite, as before")
+    parser.add_argument("--skip_episodes", type=int, default=0,
+                         help="fast-forward this many episodes (scene resample + goal advance, no "
+                              "planning/execution) before running the real episode(s). To reproduce a "
+                              "single episode from a larger run, rerun with the *same* --seed, "
+                              "--num_episodes 1, and --skip_episodes set to (target episode's CSV "
+                              "'episode' number - 1) -- this lands on the same scene and, for archetypes "
+                              "like upbench_native_mirror whose goal pool is drawn once and consumed in "
+                              "sequence across episodes, the same goal too")
     args = parser.parse_args()
 
     scenario_names = args.scenarios.split(",") if args.scenarios else list(SCENARIOS)
@@ -163,4 +190,5 @@ if __name__ == "__main__":
     main(
         scenario_names, args.seed, args.num_episodes, args.n_targets, args.max_step,
         args.show, args.verbose, args.debug_draw, Path(args.out), args.extend,
+        skip_episodes=args.skip_episodes,
     )
